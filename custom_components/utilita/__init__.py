@@ -606,59 +606,59 @@ class UtilitaDataUpdateCoordinator(DataUpdateCoordinator):
                         "Failed to fetch usage",
                     )
 
-                    # Unread messages are optional; core balance/usage still updates.
-                    previous = self.data if isinstance(self.data, dict) else {}
+                # Unread messages are optional; core balance/usage still updates.
+                previous = self.data if isinstance(self.data, dict) else {}
 
-                    stage = "/messages-unread"
-                    messages_text, messages_ok = await self._async_optional_request(
-                        session,
-                        "https://my.utilita.co.uk/messages-unread",
-                        "Failed to fetch unread messages",
-                        response_type="text",
-                        fallback=None,
-                        timeout=6,
-                    )
-                    if messages_ok:
-                        try:
-                            messages_unread = int(messages_text.strip())
-                        except (ValueError, AttributeError):
-                            messages_ok = False
-                            messages_unread = previous.get("messages_unread")
-                            _LOGGER.warning(
-                                "Utilita [%s] OPTIONAL API FAILED /messages-unread "
-                                "invalid count; keeping last known value",
-                                entry_id,
-                            )
-                    else:
+                stage = "/messages-unread"
+                messages_text, messages_ok = await self._async_optional_request(
+                    session,
+                    "https://my.utilita.co.uk/messages-unread",
+                    "Failed to fetch unread messages",
+                    response_type="text",
+                    fallback=None,
+                    timeout=6,
+                )
+                if messages_ok:
+                    try:
+                        messages_unread = int(messages_text.strip())
+                    except (ValueError, AttributeError):
+                        messages_ok = False
                         messages_unread = previous.get("messages_unread")
-
-                    if not messages_ok:
                         _LOGGER.warning(
-                            "Utilita [%s] REFRESH PARTIAL: core account/balance/usage "
-                            "updated; unread_messages=stale_or_unavailable",
+                            "Utilita [%s] OPTIONAL API FAILED /messages-unread "
+                            "invalid count; keeping last known value",
                             entry_id,
                         )
+                else:
+                    messages_unread = previous.get("messages_unread")
 
-                    _LOGGER.debug(
-                        "Utilita [%s] REFRESH COMPLETE core endpoints in %.2fs",
-                        entry_id, time.monotonic() - started,
+                if not messages_ok:
+                    _LOGGER.warning(
+                        "Utilita [%s] REFRESH PARTIAL: core account/balance/usage "
+                        "updated; unread_messages=stale_or_unavailable",
+                        entry_id,
                     )
-                    self.login_retry_after = None
-                    self._reauth_requested = False
-                    self.session_validated = True
-                    self.last_session_check = time.time()
-                    self.retry_attempts = 0
-                    return {
-                        "balance": balance,
-                        "usage": usage,
-                        "user_data": user_data,
-                        "messages_unread": messages_unread,
-                        "api_status": {
-                            "messages_unread": "ok" if messages_ok else (
-                                "stale" if messages_unread is not None else "unavailable"
-                            ),
-                        },
-                    }
+
+                _LOGGER.debug(
+                    "Utilita [%s] REFRESH COMPLETE core endpoints in %.2fs",
+                    entry_id, time.monotonic() - started,
+                )
+                self.login_retry_after = None
+                self._reauth_requested = False
+                self.session_validated = True
+                self.last_session_check = time.time()
+                self.retry_attempts = 0
+                return {
+                    "balance": balance,
+                    "usage": usage,
+                    "user_data": user_data,
+                    "messages_unread": messages_unread,
+                    "api_status": {
+                        "messages_unread": "ok" if messages_ok else (
+                            "stale" if messages_unread is not None else "unavailable"
+                        ),
+                    },
+                }
         except TimeoutError as err:
             elapsed = time.monotonic() - started
             _LOGGER.warning(
@@ -710,14 +710,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = UtilitaDataUpdateCoordinator(hass, entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"coordinator": coordinator, "config": entry}
-    await coordinator.async_config_entry_first_refresh()
-    if not coordinator.last_update_success:
-        _LOGGER.error(f"Initial refresh failed for entry {entry.entry_id}")
-        return False
-    coordinator._async_configure_keepalive()
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
-    entry.async_on_unload(entry.add_update_listener(async_options_updated))
-    return True
+
+    setup_complete = False
+    try:
+        await coordinator.async_config_entry_first_refresh()
+        if not coordinator.last_update_success:
+            _LOGGER.error("Initial refresh failed for entry %s", entry.entry_id)
+            return False
+
+        coordinator._async_configure_keepalive()
+        await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+        entry.async_on_unload(entry.add_update_listener(async_options_updated))
+        setup_complete = True
+        return True
+    finally:
+        if not setup_complete:
+            # Also close the private session if first refresh raises
+            # ConfigEntryNotReady (or setup is cancelled).
+            try:
+                await coordinator.async_unload()
+            finally:
+                hass.data[DOMAIN].pop(entry.entry_id, None)
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
